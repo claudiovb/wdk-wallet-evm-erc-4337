@@ -24,6 +24,13 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     /** @private */
     private _nonceLock;
     /**
+     * Dedicated ERC-4337 2D-nonce lane (key) for this instance.
+     *
+     * @private
+     * @type {number}
+     */
+    private _nonceKey;
+    /**
      * The derivation path's index of this account.
      *
      * @type {number}
@@ -140,6 +147,8 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     private _rebindCachedQuoteNonce;
     /** @private */
     private _freshQuote;
+    /** @private */
+    private static _randomNonceKey;
     /** @private */
     private static _isRetriableSendError;
     /** @private */

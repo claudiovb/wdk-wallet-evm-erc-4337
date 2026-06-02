@@ -114,6 +114,7 @@ export const FEE_TOLERANCE_COEFFICIENT = 120n
  * @property {string} bundlerUrl - The url of the bundler service.
  * @property {string} safeModulesVersion - Version of the Safe 4337 module set to deploy with the account (e.g. "0.3.0"). Determines the module addresses used in init code.
  * @property {OnChainIdentifier | string} [onChainIdentifier] - Optional on-chain identifier. Appends a 50-byte project marker to every UserOperation callData. Pass a string to reuse it as the project name, or a full object for more control.
+ * @property {number} [nonceKey] - Optional ERC-4337 2D-nonce lane (key) to submit this account's UserOperations under. Isolates this account's nonce sequence from key 0 (external clients) and from other instances. Defaults to a random per-instance lane; pin a value only if you need a stable, reproducible lane across processes.
  */
 
 /**
@@ -474,6 +475,17 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
   }
 
   /**
+   * Whether the Safe account is deployed on-chain.
+   *
+   * @protected
+   * @returns {Promise<boolean>}
+   */
+  async _isDeployed () {
+    if (this._deployedSmartAccount) return true
+    return await SafeAccount030.isDeployed(await this.getAddress(), this._provider)
+  }
+
+  /**
    * Returns an AbstractionKit Bundler for querying UserOperations.
    *
    * @protected
@@ -686,9 +698,9 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * @returns {Promise<BuiltUserOperation & Omit<TransactionResult, 'hash'>>} The built operation plus its raw fee (no tolerance buffer applied).
    * @throws {Error} If the token paymaster reports AA50 (account does not hold the paymaster token).
    */
-  async _getUserOperationGasCost (txs, config) {
+  async _getUserOperationGasCost (txs, config, extraOverrides = {}) {
     const calls = WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs)
-    const txOverrides = WalletAccountReadOnlyEvmErc4337._extractGasOverrides(txs[0])
+    const txOverrides = { ...WalletAccountReadOnlyEvmErc4337._extractGasOverrides(txs[0]), ...extraOverrides }
 
     try {
       const buildResult = await this._buildUserOperation(calls, config, txOverrides)
