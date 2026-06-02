@@ -89,7 +89,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     this._quoteCache = new Map()
 
     /** @private */
-    this._nextNonce = undefined
+    this._reservedNonces = new Set()
 
     /** @private */
     this._nonceLock = Promise.resolve()
@@ -273,7 +273,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       const hash = await this._sendUserOperation(txs, { config: mergedConfig, cachedBuild: prepared })
       return { hash, fee: prepared.fee }
     } catch (error) {
-      this._maybeResyncOnRejection(error)
+      this._maybeReleaseNonceOnRejection(error, prepared.userOp.nonce)
       if (!resolved.fromCache || !WalletAccountEvmErc4337._isRetriableSendError(error)) {
         throw error
       }
@@ -285,7 +285,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
         const hash = await this._sendUserOperation(txs, { config: mergedConfig, cachedBuild: prepared })
         return { hash, fee: prepared.fee }
       } catch (retryError) {
-        this._maybeResyncOnRejection(retryError)
+        this._maybeReleaseNonceOnRejection(retryError, prepared.userOp.nonce)
         throw retryError
       }
     }
@@ -314,7 +314,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     let prepared = await this._prepareForSubmit(resolved.quote, txs, mergedConfig)
 
     if (!isSponsored && transferMaxFee !== undefined && prepared.fee >= transferMaxFee) {
-      this._nextNonce = undefined
+      this._releaseNonce(prepared.userOp.nonce)
       throw new Error('Exceeded maximum fee cost for transfer operation.')
     }
 
@@ -322,7 +322,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       const hash = await this._sendUserOperation(txs, { config: mergedConfig, cachedBuild: prepared })
       return { hash, fee: prepared.fee }
     } catch (error) {
-      this._maybeResyncOnRejection(error)
+      this._maybeReleaseNonceOnRejection(error, prepared.userOp.nonce)
       if (!resolved.fromCache || !WalletAccountEvmErc4337._isRetriableSendError(error)) {
         throw error
       }
@@ -331,7 +331,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       prepared = await this._prepareForSubmit(fresh, txs, mergedConfig)
 
       if (!isSponsored && transferMaxFee !== undefined && prepared.fee >= transferMaxFee) {
-        this._nextNonce = undefined
+        this._releaseNonce(prepared.userOp.nonce)
         throw new Error('Exceeded maximum fee cost for transfer operation.')
       }
 
@@ -339,7 +339,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
         const hash = await this._sendUserOperation(txs, { config: mergedConfig, cachedBuild: prepared })
         return { hash, fee: prepared.fee }
       } catch (retryError) {
-        this._maybeResyncOnRejection(retryError)
+        this._maybeReleaseNonceOnRejection(retryError, prepared.userOp.nonce)
         throw retryError
       }
     }
@@ -386,18 +386,27 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     try {
       await prev
       const onChain = await fetchAccountNonce(this._provider, this._config.entryPointAddress ?? ENTRYPOINT_V7, this._address)
-      const next = this._nextNonce !== undefined && this._nextNonce > onChain ? this._nextNonce : onChain
-      this._nextNonce = next + 1n
-      return next
+      for (const reserved of this._reservedNonces) {
+        if (reserved < onChain) this._reservedNonces.delete(reserved)
+      }
+      let candidate = onChain
+      while (this._reservedNonces.has(candidate)) candidate += 1n
+      this._reservedNonces.add(candidate)
+      return candidate
     } finally {
       release()
     }
   }
 
   /** @private */
-  _maybeResyncOnRejection (error) {
+  _releaseNonce (nonce) {
+    if (nonce !== undefined && nonce !== null) this._reservedNonces.delete(nonce)
+  }
+
+  /** @private */
+  _maybeReleaseNonceOnRejection (error, nonce) {
     if (WalletAccountEvmErc4337._isPreAcceptanceError(error)) {
-      this._nextNonce = undefined
+      this._releaseNonce(nonce)
     }
   }
 
@@ -407,7 +416,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     try {
       return await this._prepareForSend(quote, txs, allocatedNonce, mergedConfig)
     } catch (error) {
-      this._nextNonce = undefined
+      this._releaseNonce(allocatedNonce)
       throw error
     }
   }

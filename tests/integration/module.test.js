@@ -722,7 +722,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
   test('should send two concurrent transactions with sequential nonces', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
     account0._quoteCache.clear()
-    account0._nextNonce = undefined
+    account0._reservedNonces.clear()
 
     const TX_A = { to: ACCOUNT1.safeAddress, value: 0 }
     const TX_B = { to: ACCOUNT0.safeAddress, value: 0 }

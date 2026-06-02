@@ -20,7 +20,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     /** @private */
     private _quoteCache;
     /** @private */
-    private _nextNonce;
+    private _reservedNonces;
     /** @private */
     private _nonceLock;
     /**
@@ -123,7 +123,9 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     /** @private */
     private _allocateNonce;
     /** @private */
-    private _maybeResyncOnRejection;
+    private _releaseNonce;
+    /** @private */
+    private _maybeReleaseNonceOnRejection;
     /** @private */
     private _prepareForSend;
     /** @private */
