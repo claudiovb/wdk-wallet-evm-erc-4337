@@ -56,11 +56,6 @@ const QUOTE_MAX_AGE_MS = 2 * 60 * 1_000
 // Avoid hanging RPC blocking the wallet indefinitely
 const NONCE_READ_TIMEOUT_MS = 30 * 1_000
 
-// Send-failure markers, defined once so the "retriable" and "pre-acceptance"
-// predicates can't drift apart. Every retriable rejection is also a
-// pre-acceptance one (the op never entered the mempool), so retriable =
-// RETRIABLE_AA + SHARED, and pre-acceptance = retriable set + the extra
-// validation codes a fresh quote can't fix.
 const SHARED_REJECTION_MARKERS = [
   'nonce', 'already known', 'replacement underpriced', 'underpriced',
   'fee too low', 'sender already constructed'
@@ -504,13 +499,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     return WalletAccountEvmErc4337._matchesAbstractionKitMarkers(error, [...RETRIABLE_AA_CODES, ...SHARED_REJECTION_MARKERS])
   }
 
-  /**
-   * Whether an AbstractionKit error's message (or its cause's) contains any of
-   * the given lowercase markers. Shared by the retriable / pre-acceptance
-   * predicates so their parsing logic lives in one place.
-   *
-   * @private
-   */
+  /** @private */
   static _matchesAbstractionKitMarkers (error, markers) {
     if (!(error instanceof AbstractionKitError)) return false
 
