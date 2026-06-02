@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
 import WalletManagerEvmErc4337 from '../../index.js'
 import { ethers } from 'ethers'
-import { AbstractionKitError } from 'abstractionkit'
+import { AbstractionKitError, fetchAccountNonce } from 'abstractionkit'
 import { alto } from 'prool/instances'
 import { paymaster } from '@pimlico/mock-paymaster'
 import { MOCK_PAYMASTER_TOKEN_ADDRESS, mintMockTokens } from '../helpers/mock-paymaster-token.js'
@@ -762,6 +762,26 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     expect(receiptA.status).toBe(1)
     expect(receiptB.status).toBe(1)
     expect(resA.hash).not.toBe(resB.hash)
+  }, TIMEOUT)
+
+  test('should submit ops in a dedicated nonce lane, leaving key 0 untouched', async () => {
+    const account0 = await wallet.getAccountByPath("0'/0/0")
+    account0._quoteCache.clear()
+    account0._reservedNonces.clear()
+    account0._nonceKey = 777 // pin a known, previously-unused lane
+
+    const key0Before = await fetchAccountNonce(account0._provider, ENTRY_POINT_ADDRESS, ACCOUNT0.safeAddress, 0)
+    const laneBefore = await fetchAccountNonce(account0._provider, ENTRY_POINT_ADDRESS, ACCOUNT0.safeAddress, 777)
+
+    const { hash } = await account0.sendTransaction({ to: ACCOUNT1.safeAddress, value: 0 })
+    await waitForTx(hash, account0)
+
+    const key0After = await fetchAccountNonce(account0._provider, ENTRY_POINT_ADDRESS, ACCOUNT0.safeAddress, 0)
+    const laneAfter = await fetchAccountNonce(account0._provider, ENTRY_POINT_ADDRESS, ACCOUNT0.safeAddress, 777)
+
+    expect(laneAfter).toBe(laneBefore + 1n)
+    expect(key0After).toBe(key0Before)
+    expect(laneAfter >> 64n).toBe(777n)
   }, TIMEOUT)
 
   test('should release only the failed nonce and reuse it without colliding with a higher in-flight nonce', async () => {

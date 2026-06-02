@@ -172,6 +172,13 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
      */
     protected _getSmartAccount(config?: Omit<EvmErc4337WalletConfig, "transferMaxFee">): Promise<import('abstractionkit').SafeAccountV0_3_0>;
     /**
+     * Whether the Safe account is deployed on-chain (memoized).
+     *
+     * @protected
+     * @returns {Promise<boolean>}
+     */
+    protected _isDeployed(): Promise<boolean>;
+    /**
      * Returns an AbstractionKit Bundler for querying UserOperations.
      *
      * @protected
@@ -240,7 +247,9 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
      * @returns {Promise<BuiltUserOperation & Omit<TransactionResult, 'hash'>>} The built operation plus its raw fee (no tolerance buffer applied).
      * @throws {Error} If the token paymaster reports AA50 (account does not hold the paymaster token).
      */
-    protected _getUserOperationGasCost(txs: EvmErc4337Transaction[], config: Omit<EvmErc4337WalletConfig, "transferMaxFee">): Promise<BuiltUserOperation & Omit<TransactionResult, "hash">>;
+    protected _getUserOperationGasCost(txs: EvmErc4337Transaction[], config: Omit<EvmErc4337WalletConfig, "transferMaxFee">, extraOverrides?: EvmErc4337GasOverrides & {
+        nonce?: bigint;
+    }): Promise<BuiltUserOperation & Omit<TransactionResult, "hash">>;
 }
 export type Eip1193Provider = import("ethers").Eip1193Provider;
 export type TransactionResult = import("@tetherto/wdk-wallet-evm").TransactionResult;
@@ -377,6 +386,10 @@ export type EvmErc4337WalletCommonConfig = {
      * - Optional on-chain identifier. Appends a 50-byte project marker to every UserOperation callData. Pass a string to reuse it as the project name, or a full object for more control.
      */
     onChainIdentifier?: OnChainIdentifier | string;
+    /**
+     * Optional ERC-4337 2D-nonce lane (key) to submit this account's UserOperations under. Isolates this account's nonce sequence from key 0 (external clients) and from other instances. Defaults to a random per-instance lane; pin a value only if you need a stable, reproducible lane across processes.
+     */
+    nonceKey?: number;
 };
 export type EvmErc4337WalletPaymasterTokenConfig = {
     /**

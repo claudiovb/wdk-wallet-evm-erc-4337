@@ -103,6 +103,14 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
     /** @private */
     this._nonceLock = Promise.resolve()
+
+    /** @private */
+    this._nonceKey = config?.nonceKey ?? WalletAccountEvmErc4337._randomNonceKey()
+  }
+
+  /** @private */
+  static _randomNonceKey () {
+    return Math.floor(Math.random() * 0x1000000000000)
   }
 
   /**
@@ -245,7 +253,8 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       return { fee: 0n }
     }
 
-    const gasCostResult = await this._getUserOperationGasCost([tx].flat(), mergedConfig)
+    const laneNonce = await this._fetchOnChainNonce()
+    const gasCostResult = await this._getUserOperationGasCost([tx].flat(), mergedConfig, { nonce: laneNonce })
 
     const fee = BigInt(gasCostResult.fee) * FEE_TOLERANCE_COEFFICIENT / 100n
 
@@ -412,7 +421,8 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
   /** @private */
   async _fetchOnChainNonce () {
-    return await fetchAccountNonce(this._provider, this._config.entryPointAddress ?? ENTRYPOINT_V7, this._address)
+    const key = (await this._isDeployed()) ? this._nonceKey : 0
+    return await fetchAccountNonce(this._provider, this._config.entryPointAddress ?? ENTRYPOINT_V7, this._address, key)
   }
 
   /** @private */
@@ -501,8 +511,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   /** @private */
   async _rebindCachedQuoteNonce (cached, allocatedNonce, config) {
     cached.userOp.nonce = allocatedNonce
-
-    if (allocatedNonce > 0n && cached.userOp.factory != null) {
+    if (cached.userOp.factory != null && await this._isDeployed()) {
       cached.userOp.factory = null
       cached.userOp.factoryData = null
     }
