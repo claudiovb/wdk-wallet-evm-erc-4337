@@ -177,10 +177,6 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       const { userOp } = await this._signUserOperation([tx], { config: mergedConfig, cachedBuild: prepared })
       return userOp
     } finally {
-      // signTransaction only signs — the caller owns broadcasting. Release the
-      // allocated nonce so a signed-but-undelivered op doesn't leave a hole that
-      // stalls this instance's later sends (EntryPoint sequences are strict per
-      // key). The caller should broadcast promptly.
       this._releaseNonce(prepared.userOp.nonce)
       this._quoteCache.clear()
     }
@@ -419,13 +415,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     return await fetchAccountNonce(this._provider, this._config.entryPointAddress ?? ENTRYPOINT_V7, this._address)
   }
 
-  /**
-   * Races a promise against a timeout so a hung provider can't keep `_nonceLock`
-   * held forever. The underlying request is not aborted (the provider exposes no
-   * cancellation), but the lock is released and the wallet recovers.
-   *
-   * @private
-   */
+  /** @private */
   async _withNonceReadTimeout (promise) {
     let timer
     const timeout = new Promise((_resolve, reject) => {
@@ -557,13 +547,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     return JSON.stringify([tx].flat(), (_, v) => typeof v === 'bigint' ? v.toString() : v)
   }
 
-  /**
-   * Fingerprints the config fields that change the built UserOperation or its
-   * fee, so a quote cached under one config is never served to a send under a
-   * different one (e.g. sponsored ↔ token, or a different paymaster token).
-   *
-   * @private
-   */
+  /** @private */
   static _configFingerprint (config) {
     return JSON.stringify({
       isSponsored: !!config.isSponsored,
