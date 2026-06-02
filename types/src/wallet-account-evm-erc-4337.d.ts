@@ -123,9 +123,15 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     /** @private */
     private _allocateNonce;
     /** @private */
+    private _fetchOnChainNonce;
+    /** @private */
+    private _withNonceReadTimeout;
+    /** @private */
     private _releaseNonce;
     /** @private */
     private _maybeReleaseNonceOnRejection;
+    /** @private */
+    private _prepareForSubmit;
     /** @private */
     private _prepareForSend;
     /** @private */
@@ -137,9 +143,15 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     /** @private */
     private static _isRetriableSendError;
     /** @private */
+    private static _matchesAbstractionKitMarkers;
+    /** @private */
     private static _isPreAcceptanceError;
     /** @private */
     private static _getTxKey;
+    /** @private */
+    private static _configFingerprint;
+    /** @private */
+    private static _getCacheKey;
     /** @private */
     private _consumeCachedQuote;
     /** @private */

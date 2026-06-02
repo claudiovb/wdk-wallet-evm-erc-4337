@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
 import WalletManagerEvmErc4337 from '../../index.js'
 import { ethers } from 'ethers'
+import { AbstractionKitError } from 'abstractionkit'
 import { alto } from 'prool/instances'
 import { paymaster } from '@pimlico/mock-paymaster'
 import { MOCK_PAYMASTER_TOKEN_ADDRESS, mintMockTokens } from '../helpers/mock-paymaster-token.js'
@@ -629,6 +630,27 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     quoteSpy.mockRestore()
   }, TIMEOUT)
 
+  test('should not serve a token-config quote to a send made with a different (sponsored) config', async () => {
+    const account0 = await wallet.getAccountByPath("0'/0/0")
+    account0._quoteCache.clear()
+    account0._reservedNonces.clear()
+
+    const TX = { to: ACCOUNT1.safeAddress, value: 0 }
+
+    // Quote under the default (token-paymaster) config — caches a token-mode op + non-zero fee.
+    const { fee: tokenFee } = await account0.quoteSendTransaction(TX)
+    expect(tokenFee).toBeGreaterThan(0n)
+
+    // Send the SAME tx but sponsored. The cached token quote must NOT be reused:
+    // a sponsored send pays nothing, so the fee must be 0n.
+    const sponsoredConfig = { isSponsored: true, paymasterUrl: 'http://localhost:3000?pimlico' }
+    const { hash, fee } = await account0.sendTransaction(TX, sponsoredConfig)
+    const receipt = await waitForTx(hash, account0)
+
+    expect(receipt.status).toBe(1)
+    expect(fee).toBe(0n)
+  }, TIMEOUT)
+
   test('should reuse and rebind a cached transfer quote when another tx is sent in between', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
     account0._quoteCache.clear()
@@ -740,6 +762,51 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     expect(receiptA.status).toBe(1)
     expect(receiptB.status).toBe(1)
     expect(resA.hash).not.toBe(resB.hash)
+  }, TIMEOUT)
+
+  test('should release only the failed nonce and reuse it without colliding with a higher in-flight nonce', async () => {
+    const account = await wallet.getAccountByPath("0'/0/5")
+    account._reservedNonces.clear()
+
+    // Pin the on-chain read at 5 for the whole scenario: nothing our wallet
+    // submits has mined yet (the realistic concurrent-burst window).
+    const onChainSpy = jest.spyOn(account, '_fetchOnChainNonce').mockResolvedValue(5n)
+
+    const a = await account._allocateNonce()
+    const b = await account._allocateNonce()
+    expect(a).toBe(5n)
+    expect(b).toBe(6n)
+
+    // a (5) is rejected before acceptance (AA25 = invalid account nonce → nonce
+    // was never consumed); b (6) is still in flight.
+    const aa25 = new AbstractionKitError('UNKNOWN_ERROR', 'UserOperation reverted: AA25 invalid account nonce')
+    account._maybeReleaseNonceOnRejection(aa25, a)
+
+    const c = await account._allocateNonce()
+    const d = await account._allocateNonce()
+    expect(c).toBe(5n)
+    expect(d).toBe(7n)
+    expect([c, d]).not.toContain(b)
+
+    onChainSpy.mockRestore()
+    account._reservedNonces.clear()
+  }, TIMEOUT)
+
+  test('should reclaim reserved nonces once the chain advances past them', async () => {
+    const account = await wallet.getAccountByPath("0'/0/5")
+    account._reservedNonces.clear()
+    const onChainSpy = jest.spyOn(account, '_fetchOnChainNonce').mockResolvedValue(5n)
+
+    const a = await account._allocateNonce()
+    const b = await account._allocateNonce()
+    expect([a, b]).toEqual([5n, 6n])
+
+    onChainSpy.mockResolvedValue(7n) // both mined; chain advanced
+    const c = await account._allocateNonce()
+    expect(c).toBe(7n)
+
+    onChainSpy.mockRestore()
+    account._reservedNonces.clear()
   }, TIMEOUT)
 
   test('should propagate gas overrides to the final signed UserOperation across NATIVE / TOKEN / SPONSORED modes', async () => {

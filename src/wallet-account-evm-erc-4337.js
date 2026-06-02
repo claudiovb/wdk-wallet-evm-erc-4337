@@ -53,6 +53,21 @@ import WalletAccountReadOnlyEvmErc4337, { FEE_TOLERANCE_COEFFICIENT } from './wa
 
 const QUOTE_MAX_AGE_MS = 2 * 60 * 1_000
 
+// Avoid hanging RPC blocking the wallet indefinitely
+const NONCE_READ_TIMEOUT_MS = 30 * 1_000
+
+// Send-failure markers, defined once so the "retriable" and "pre-acceptance"
+// predicates can't drift apart. Every retriable rejection is also a
+// pre-acceptance one (the op never entered the mempool), so retriable =
+// RETRIABLE_AA + SHARED, and pre-acceptance = retriable set + the extra
+// validation codes a fresh quote can't fix.
+const SHARED_REJECTION_MARKERS = [
+  'nonce', 'already known', 'replacement underpriced', 'underpriced',
+  'fee too low', 'sender already constructed'
+]
+const RETRIABLE_AA_CODES = ['aa10', 'aa13', 'aa14', 'aa22', 'aa23', 'aa24', 'aa25', 'aa26']
+const PRE_ACCEPTANCE_ONLY_AA_CODES = ['aa21', 'aa31', 'aa32', 'aa33', 'aa34', 'aa40', 'aa41', 'aa50', 'aa51']
+
 const USDT_MAINNET_ADDRESS = '0xdAC17F958D2ee523a2206206994597C13D831ec7'
 
 /** @implements {IWalletAccount} */
@@ -160,14 +175,20 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    const { quote } = await this._resolveQuote(tx, config)
+    const { quote } = await this._resolveQuote(tx, config, mergedConfig)
     const prepared = await this._prepareForSubmit(quote, [tx], mergedConfig)
 
-    const { userOp } = await this._signUserOperation([tx], { config: mergedConfig, cachedBuild: prepared })
-
-    this._quoteCache.clear()
-
-    return userOp
+    try {
+      const { userOp } = await this._signUserOperation([tx], { config: mergedConfig, cachedBuild: prepared })
+      return userOp
+    } finally {
+      // signTransaction only signs — the caller owns broadcasting. Release the
+      // allocated nonce so a signed-but-undelivered op doesn't leave a hole that
+      // stalls this instance's later sends (EntryPoint sequences are strict per
+      // key). The caller should broadcast promptly.
+      this._releaseNonce(prepared.userOp.nonce)
+      this._quoteCache.clear()
+    }
   }
 
   /**
@@ -226,7 +247,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    const txKey = WalletAccountEvmErc4337._getTxKey(tx)
+    const txKey = WalletAccountEvmErc4337._getCacheKey(tx, mergedConfig)
 
     if (mergedConfig.isSponsored) {
       this._quoteCache.set(txKey, { fee: 0n, createdAt: Date.now() })
@@ -266,7 +287,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     }
 
     const txs = [tx].flat()
-    const resolved = await this._resolveQuote(tx, config)
+    const resolved = await this._resolveQuote(tx, config, mergedConfig)
     let prepared = await this._prepareForSubmit(resolved.quote, txs, mergedConfig)
 
     try {
@@ -278,7 +299,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
         throw error
       }
 
-      const fresh = await this._freshQuote(tx, config)
+      const fresh = await this._freshQuote(tx, config, mergedConfig)
       prepared = await this._prepareForSubmit(fresh, txs, mergedConfig)
 
       try {
@@ -310,7 +331,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     const tx = await WalletAccountEvm._getTransferTransaction(options)
 
     const txs = [tx]
-    const resolved = await this._resolveQuote(tx, config)
+    const resolved = await this._resolveQuote(tx, config, mergedConfig)
     let prepared = await this._prepareForSubmit(resolved.quote, txs, mergedConfig)
 
     if (!isSponsored && transferMaxFee !== undefined && prepared.fee >= transferMaxFee) {
@@ -327,7 +348,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
         throw error
       }
 
-      const fresh = await this._freshQuote(tx, config)
+      const fresh = await this._freshQuote(tx, config, mergedConfig)
       prepared = await this._prepareForSubmit(fresh, txs, mergedConfig)
 
       if (!isSponsored && transferMaxFee !== undefined && prepared.fee >= transferMaxFee) {
@@ -366,12 +387,12 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   }
 
   /** @private */
-  async _resolveQuote (tx, config) {
-    let cached = this._consumeCachedQuote(tx)
+  async _resolveQuote (tx, config, mergedConfig) {
+    let cached = this._consumeCachedQuote(tx, mergedConfig)
 
     if (!cached) {
       await this.quoteSendTransaction(tx, config)
-      cached = this._consumeCachedQuote(tx)
+      cached = this._consumeCachedQuote(tx, mergedConfig)
       return { quote: cached, fromCache: false }
     }
 
@@ -385,7 +406,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     this._nonceLock = new Promise(resolve => { release = resolve })
     try {
       await prev
-      const onChain = await fetchAccountNonce(this._provider, this._config.entryPointAddress ?? ENTRYPOINT_V7, this._address)
+      const onChain = await this._withNonceReadTimeout(this._fetchOnChainNonce())
       for (const reserved of this._reservedNonces) {
         if (reserved < onChain) this._reservedNonces.delete(reserved)
       }
@@ -395,6 +416,30 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       return candidate
     } finally {
       release()
+    }
+  }
+
+  /** @private */
+  async _fetchOnChainNonce () {
+    return await fetchAccountNonce(this._provider, this._config.entryPointAddress ?? ENTRYPOINT_V7, this._address)
+  }
+
+  /**
+   * Races a promise against a timeout so a hung provider can't keep `_nonceLock`
+   * held forever. The underlying request is not aborted (the provider exposes no
+   * cancellation), but the lock is released and the wallet recovers.
+   *
+   * @private
+   */
+  async _withNonceReadTimeout (promise) {
+    let timer
+    const timeout = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('Timed out reading the on-chain account nonce.')), NONCE_READ_TIMEOUT_MS)
+    })
+    try {
+      return await Promise.race([promise, timeout])
+    } finally {
+      clearTimeout(timer)
     }
   }
 
@@ -449,22 +494,29 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   }
 
   /** @private */
-  async _freshQuote (tx, config) {
+  async _freshQuote (tx, config, mergedConfig) {
     await this.quoteSendTransaction(tx, config)
-    return this._consumeCachedQuote(tx)
+    return this._consumeCachedQuote(tx, mergedConfig)
   }
 
   /** @private */
   static _isRetriableSendError (error) {
+    return WalletAccountEvmErc4337._matchesAbstractionKitMarkers(error, [...RETRIABLE_AA_CODES, ...SHARED_REJECTION_MARKERS])
+  }
+
+  /**
+   * Whether an AbstractionKit error's message (or its cause's) contains any of
+   * the given lowercase markers. Shared by the retriable / pre-acceptance
+   * predicates so their parsing logic lives in one place.
+   *
+   * @private
+   */
+  static _matchesAbstractionKitMarkers (error, markers) {
     if (!(error instanceof AbstractionKitError)) return false
 
     const message = `${error.message ?? ''} ${error.cause?.message ?? ''}`.toLowerCase()
 
-    return [
-      'aa10', 'aa13', 'aa14', 'aa22', 'aa23', 'aa24', 'aa25', 'aa26',
-      'nonce', 'already known', 'replacement underpriced', 'underpriced',
-      'fee too low', 'sender already constructed'
-    ].some(marker => message.includes(marker))
+    return markers.some(marker => message.includes(marker))
   }
 
   /** @private */
@@ -505,14 +557,8 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
   /** @private */
   static _isPreAcceptanceError (error) {
-    if (error instanceof AbstractionKitError) {
-      const message = `${error.message ?? ''} ${error.cause?.message ?? ''}`.toLowerCase()
-      return [
-        'aa10', 'aa13', 'aa14', 'aa21', 'aa22', 'aa23', 'aa24', 'aa25', 'aa26',
-        'aa31', 'aa32', 'aa33', 'aa34', 'aa40', 'aa41', 'aa50', 'aa51',
-        'nonce', 'already known', 'replacement underpriced', 'underpriced',
-        'fee too low', 'sender already constructed'
-      ].some(marker => message.includes(marker))
+    if (WalletAccountEvmErc4337._matchesAbstractionKitMarkers(error, [...RETRIABLE_AA_CODES, ...PRE_ACCEPTANCE_ONLY_AA_CODES, ...SHARED_REJECTION_MARKERS])) {
+      return true
     }
     return typeof error?.message === 'string' && error.message.includes('Not enough funds')
   }
@@ -522,9 +568,32 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     return JSON.stringify([tx].flat(), (_, v) => typeof v === 'bigint' ? v.toString() : v)
   }
 
+  /**
+   * Fingerprints the config fields that change the built UserOperation or its
+   * fee, so a quote cached under one config is never served to a send under a
+   * different one (e.g. sponsored ↔ token, or a different paymaster token).
+   *
+   * @private
+   */
+  static _configFingerprint (config) {
+    return JSON.stringify({
+      isSponsored: !!config.isSponsored,
+      useNativeCoins: !!config.useNativeCoins,
+      paymasterUrl: config.paymasterUrl ?? null,
+      paymasterAddress: config.paymasterAddress ?? null,
+      paymasterToken: config.paymasterToken?.address ?? null,
+      sponsorshipPolicyId: config.sponsorshipPolicyId ?? null
+    })
+  }
+
   /** @private */
-  _consumeCachedQuote (tx) {
-    const txKey = WalletAccountEvmErc4337._getTxKey(tx)
+  static _getCacheKey (tx, config) {
+    return `${WalletAccountEvmErc4337._configFingerprint(config)}::${WalletAccountEvmErc4337._getTxKey(tx)}`
+  }
+
+  /** @private */
+  _consumeCachedQuote (tx, config) {
+    const txKey = WalletAccountEvmErc4337._getCacheKey(tx, config)
     const quote = this._quoteCache.get(txKey)
 
     if (!quote) {
